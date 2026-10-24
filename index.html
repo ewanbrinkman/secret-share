@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>Locked</title>
+<style id="unlock-style">
+  :root { --bg: #f6f7f9; --fg: #1d2330; --muted: #6b7385; --card: #fff; --line: #d6dae3; --accent: #c98a00; --bad: #c0392b; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #11151c; --fg: #e6e9ef; --muted: #8a93a6; --card: #1a2029; --line: #2c3442; --accent: #f0a500; --bad: #ff6b5b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px;
+         background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, -apple-system, sans-serif; }
+  form { width: 100%; max-width: 380px; background: var(--card); border: 1px solid var(--line);
+         border-radius: 10px; padding: 22px; display: grid; gap: 12px; }
+  h1 { margin: 0; font-size: 18px; }
+  input[type=password] { width: 100%; padding: 10px 12px; font: inherit; color: inherit; background: var(--bg);
+         border: 1px solid var(--line); border-radius: 6px; }
+  label { color: var(--muted); font-size: 13px; display: flex; gap: 6px; align-items: center; }
+  button { padding: 10px; font: inherit; font-weight: 600; border: 0; border-radius: 6px; background: var(--accent); color: #1d2330; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: default; }
+  #msg { min-height: 1.4em; margin: 0; font-size: 13px; color: var(--muted); }
+  #msg.bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<form id="unlock" autocomplete="off">
+  <h1>Locked</h1>
+  <input type="password" id="pass" placeholder="Passphrase" aria-label="Passphrase" autofocus>
+  <label><input type="checkbox" id="remember"> remember on this device</label>
+  <button type="submit" id="go">Unlock</button>
+  <p id="msg" role="status"></p>
+</form>
+<script>
+// site.bin = "MZE1" | PBKDF2 iterations (uint32, big-endian) | salt (16) | nonce (12) | AES-GCM ciphertext.
+// Decrypted, it is a gzipped JSON object {file name: text} holding the page, its script,
+// its styles and data.json. Nothing readable is stored on the server.
+// Wrapped so none of these names clash with the viewer's own script once it starts.
+(() => {
+const KEY = "unlock-passphrase";
+const $ = (id) => document.getElementById(id);
+let blob = null;
+
+async function unlockBundle(passphrase) {
+  if (!blob) {
+    const res = await fetch("site.bin", { cache: "no-store" });
+    if (!res.ok) throw new Error(`could not load the site (HTTP ${res.status})`);
+    blob = new Uint8Array(await res.arrayBuffer());
+  }
+  if (String.fromCharCode(...blob.slice(0, 4)) !== "MZE1") throw new Error("the site file is damaged");
+  const iterations = new DataView(blob.buffer).getUint32(4);
+  const salt = blob.slice(8, 24), nonce = blob.slice(24, 36);
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(passphrase), "PBKDF2", false, ["deriveKey"]);
+  const key = await crypto.subtle.deriveKey({ name: "PBKDF2", hash: "SHA-256", salt, iterations },
+    base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+  let zipped;
+  try {
+    zipped = await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, key, blob.slice(36));
+  } catch {
+    throw Object.assign(new Error("Wrong passphrase."), { wrong: true });
+  }
+  const text = await new Response(new Blob([zipped]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+  return JSON.parse(text);
+}
+
+function start(files) {
+  const doc = new DOMParser().parseFromString(files["index.html"], "text/html");
+  document.title = doc.title;
+  $("unlock-style").remove();
+  document.head.append(Object.assign(document.createElement("style"), { textContent: files["style.css"] }));
+  for (const s of doc.body.querySelectorAll("script")) s.remove(); // added below, from the bundle
+  document.body.innerHTML = doc.body.innerHTML;
+  window.MAZE_DATA = JSON.parse(files["data.json"]);
+  document.body.append(Object.assign(document.createElement("script"), { textContent: files["app.js"] }));
+}
+
+async function attempt(passphrase, remember) {
+  $("go").disabled = true;
+  $("msg").className = ""; $("msg").textContent = "Unlocking…";
+  try {
+    const files = await unlockBundle(passphrase);
+    try { if (remember) localStorage.setItem(KEY, passphrase); } catch { /* ignore */ }
+    start(files);
+  } catch (err) {
+    if (err.wrong) { try { localStorage.removeItem(KEY); } catch { /* ignore */ } }
+    $("msg").className = "bad"; $("msg").textContent = err.message;
+    $("go").disabled = false;
+  }
+}
+
+$("unlock").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const p = $("pass").value.trim();
+  if (p) attempt(p, $("remember").checked);
+});
+
+let saved = null;
+try { saved = localStorage.getItem(KEY); } catch { /* ignore */ }
+if (saved) { $("remember").checked = true; attempt(saved, true); }
+})();
+</script>
+</body>
+</html>
